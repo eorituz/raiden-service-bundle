@@ -1,11 +1,11 @@
-# Raiden Service Bundle
+# Raiden Service Bundle (RSB)
 
 ## What is this repository
 
 This repository contains the documentation and configuration necessary to run a
 Raiden Service Bundle.
 
-**Current release:** [2019.11.1](https://github.com/raiden-network/raiden-service-bundle/tree/2019.11.1)
+**Current release:** [2020.03.0rc1](https://github.com/raiden-network/raiden-service-bundle/tree/2020.03.0rc1)
 
 ## Table of Contents
 
@@ -16,6 +16,7 @@ Raiden Service Bundle.
 - [Installation](#installation)
 - [Upgrades](#upgrades)
 - [Known issues](#known-issues)
+- [Contact / Troubleshooting](#contact-troubleshooting)
 - [Changelog](#changelog)
 
 ## Overview
@@ -116,6 +117,7 @@ Note: The default Postgres configuration assumes 16GiB of system RAM
 ### Other
 
 - A domain (or subdomain) for exclusive use by this server
+- No other software should be used in production on this server 
 
 ## Installation
 
@@ -125,39 +127,66 @@ Note: The default Postgres configuration assumes 16GiB of system RAM
 1. Ensure a domain (or subdomain) is available
 
    Examples:
-   - raidentransport.somecompany.tld
-   - raidentransport-somecompany.tld
-   - somecompany-raidentransport.tld
+   - raiden.somedomain.com
 
 1. Configure `A` (and optionally `AAAA`) DNS records for the domain pointing to the servers IP address(es)
 1. Configure a `CNAME` DNS record for `*.<domain>` pointing back to `<domain>`
 
-### Installing
 
-1. Clone the [current release version of this repository](https://github.com/raiden-network/raiden-service-bundle/tree/2019.11.1)
+
+
+### Installing the RSB <a name="installation/installing" />
+
+1. Clone the [current release version of this repository](https://github.com/raiden-network/raiden-service-bundle/tree/2020.03.0rc1)
    to a suitable location on the server:
 
    ```shell
-   git clone -b 2019.11.1 https://github.com/raiden-network/raiden-service-bundle.git
+   git clone -b 2020.03.0rc1 https://github.com/raiden-network/raiden-service-bundle.git
    ```
 1. Copy `.env.template` to `.env` and modify the values to fit your setup (see inline comments for details)
    - We would appreciate it if you allow us access to the monitoring interfaces
      (to do that uncomment the default values of the `CIDR_ALLOW_METRICS` and `CIDR_ALLOW_PROXY` settings).
    - We also recommend that you provide your own monitoring. The setup of which is currently out of scope of this document.
-1. Make sure, that the account, configured in `KEYSTORE_FILE`, has enough funding to register as a service operator.
-1. If you haven't done so before, run `./register-service-provider.sh` (it uses configuration values from `.env`).
+   - Please, read carefully the disclaimers for the path finding and monitoring service and uncomment the variables `XX_ACCEPT_DISCLAIMER` if you agree. Note, that the services won't start if you do not.
+1. If you haven't done so before, run `./register-service-provider.sh` (it uses configuration values from `.env`). Please read the information provided [Registering as a RSB Provider](#installation/registering) carefully before executing the script.
 1. Run `docker-compose up -d` to start all services
    - The services are configured to automatically restart in case of a crash or reboot
-1. Verify the service is up by opening the domain in a browser. You should see a page with the Matrix logo.
 
-### Troubleshooting
+---
+**NOTE**
+
+Being accepted in the whitelist as a part of the federation currently takes up to 24 hours after your server name has been added to `known_servers.main.yaml`. After running `docker-compose up -d` you will likely encounter errors but you don't need to worry about them as they will resolve over time. The RSB is configured to restart upon failure automatically. Please verify that your RSB is connected and running successfully after a period of 24 hours.
+
+---
+
+### Registering as a RSB Provider <a name="installation/registering" />
+If you want to participate in the network by running a Raiden Service Bundle you need to register yourself as a provider. Currently, there are two conditions that must be fulfilled to run the RSB successfully.
+
+1. **Registering in the Services Registry On-Chain**  
+  - In order to register as a service provider you need to run the script [`register-service-provider.sh`](https://github.com/raiden-network/raiden-service-bundle/blob/master/register-service-provider.sh).
+  - Make sure that the account is stored in `${DATA_DIR}/keystore/`. If not, the script will exit with an error and you cannot register as a service provider.
+  - Make sure, that the account, configured in `KEYSTORE_FILE`, has enough funding to register as a service provider. Click [here](https://goerli.etherscan.io/address/0x735722704e365c37247bb3e4ec52d6c937c54539#readContract) (Currently deployed on goerli) to find out what the current price for a slot is. You will find the price under `3. currentPrice` denominated in SVT. Otherwise, the script will tell you the price, too.
+
+
+2. **Extending `known_servers.main.yaml`**  
+  - In order to be whitelisted in the Matrix Federation, the list needs to be extended with your server name.
+  - [Create an issue](https://github.com/raiden-network/raiden-service-bundle/issues/new) and submit the
+   domain / URL of the newly deployed server for inclusion in the list of known servers. Please, state your server name as you have set `$SERVER_NAME` in your `.env` file.
+
+### Verifying that the RSB is working
+
+- Matrix
+
+- PFS
+
+- MS
+
+
+### Troubleshooting the RSB installation
 After starting, you can run `docker-compose ps` -- if any services are not in `Up`, `Up (healthy)` or `Exit 0` state, you should check the respective logs for configuration errors.
 Note: some services might need a few minutes to become healthy.
 
-### Submit a Transport Server to the federation
 
-1. [Create an issue](https://github.com/raiden-network/raiden-service-bundle/issues/new) and submit the
-   domain / URL of the newly deployed server for inclusion in the list of known servers.
 
 ## Upgrades
 
@@ -191,14 +220,14 @@ selecting a transport server, based on response times. We intend to change this
 in the future to use a decentralized scheme (for example an on-chain registry).
 
 
-## Contact / Troubleshooting
+## Contact / Troubleshooting <a name="contact-troubleshooting" />
 
 To report issues or request help with the setup please [open an issue](https://github.com/raiden-network/raiden-service-bundle/issues/new)
 or contact us via email at contact@raiden.nework.
 
 
 ## Changelog
-See `CHANGELOG.md`.
+See [`CHANGELOG.md`](https://github.com/raiden-network/raiden-service-bundle/blob/master/CHANGELOG.md).
 
 ## Licenses
 

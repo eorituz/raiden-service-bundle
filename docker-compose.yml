@@ -3,17 +3,19 @@ version: '2.3'
 # versions: change these in order to pin versions for a certain releases
 x-versions:
   services: &IMAGE_RAIDEN_SERVICES_VERSION
-    image: raidennetwork/raiden-services:stable
+    image: raidennetwork/raiden-services:v0.7.1
   db: &IMAGE_DB_VERSION
-    image: raidennetwork/raiden-services-bundle:2019.11.1-db
+    image: raidennetwork/raiden-service-bundle:2020.03.0rc1-db
   synapse: &IMAGE_SYNAPSE_VERSION
-    image: raidennetwork/raiden-services-bundle:2019.11.1-synapse
+    image: raidennetwork/raiden-service-bundle:2020.03.0rc1-synapse
   well-known-server: &IMAGE_WELL_KNOWN_VERSION
-    image: raidennetwork/raiden-services-bundle:2019.11.1-well_known_server
-  traefik: &IMAGE_TRAEFIK_VERSION
-    image: traefik:1.7
+    image: raidennetwork/raiden-service-bundle:2020.03.0rc1-well_known_server
+  room_ensurer: &IMAGE_ROOM_ENSURER_VERSION
+    image: raidennetwork/raiden-service-bundle:2020.03.0rc1-room_ensurer
   purger: &IMAGE_PURGER_VERSION
-    image: python:3.7
+    image: raidennetwork/raiden-service-bundle:2020.03.0rc1-purger
+  traefik: &IMAGE_TRAEFIK_VERSION
+     image: traefik:2.1
 # /versions
 
 x-defaults: &services-defaults
@@ -23,11 +25,18 @@ x-defaults: &services-defaults
     - ${DATA_DIR:-./data}/state:/state
     - ${DATA_DIR:-./data}/keystore:/keystore
 
+x-log-config: &log-config
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "10"
+
 services:
-# raiden-services containers
+  # raiden-services containers
   pfs:
     << : *services-defaults
-    command: ["python3", "-m", "pathfinding_service.cli"]
+    command: ["python3", "-m", "pathfinding_service.cli", "--matrix-server", "https://${SERVER_NAME}"]
     restart: always
     ports:
       - 6001:6000
@@ -39,12 +48,21 @@ services:
       - PFS_KEYSTORE_FILE=/keystore/${KEYSTORE_FILE}
       - PFS_PASSWORD=${PASSWORD}
       - PFS_ETH_RPC=${ETH_RPC}
-    labels:
-      - "traefik.enable=true"
-      - "traefik.frontend.rule=Host:pfs.${SERVER_NAME}"
-      - "traefik.default.backend.healthcheck.path=/api/v1/info"
+      - PFS_ACCEPT_DISCLAIMER=${PFS_ACCEPT_DISCLAIMER}
+    depends_on:
+      synapse:
+        condition: service_healthy
     healthcheck:
       disable: true
+    << : *log-config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pfs.rule=Host(`pfs.${SERVER_NAME}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.pfs.tls=true"
+      - "traefik.http.routers.pfs.tls.certresolver=le"
+      - "traefik.http.routers.pfs.service=pfs"
+      - "traefik.http.services.pfs.loadbalancer.healthcheck.path=/api/v1/info"
 
   ms:
     << : *services-defaults
@@ -58,12 +76,15 @@ services:
       - MS_KEYSTORE_FILE=/keystore/${KEYSTORE_FILE}
       - MS_PASSWORD=${PASSWORD}
       - MS_ETH_RPC=${ETH_RPC}
+      - MS_ACCEPT_DISCLAIMER=${MS_ACCEPT_DISCLAIMER}
     healthcheck:
-      test: 'python3 -c "import sqlite3, sys; from time import sleep; conn=sqlite3.connect(\"/state/ms-state.db\"); r = lambda: conn.execute(\"select latest_commited_block from blockchain ORDER BY latest_commited_block DESC LIMIT 1;\").fetchone()[0]; one = r(); sleep(25); two = r(); print(two); sys.exit(0 if two > one else 1)"'
+      test: 'python3 -c "import sqlite3, sys; from time import sleep; conn=sqlite3.connect(\"/state/ms-state.db\"); r = lambda: conn.execute(\"select latest_committed_block from blockchain ORDER BY latest_committed_block DESC LIMIT 1;\").fetchone()[0]; one = r(); sleep(25); two = r(); print(two); sys.exit(0 if two > one else 1)"'
+      start_period: 30s
+    << : *log-config
 
   msrc:
     << : *services-defaults
-    command: ["python3", "-m", "request_collector.cli"]
+    command: ["python3", "-m", "request_collector.cli", "--matrix-server", "https://${SERVER_NAME}"]
     restart: always
     ports:
       - 6003:6000
@@ -73,11 +94,15 @@ services:
       - MSRC_KEYSTORE_FILE=/keystore/${KEYSTORE_FILE}
       - MSRC_PASSWORD=${PASSWORD}
       - MSRC_CHAIN_ID=${CHAIN_ID}
+      - MSRC_ACCEPT_DISCLAIMER=${MS_ACCEPT_DISCLAIMER}
     depends_on:
+      synapse:
+        condition: service_healthy
       ms:
         condition: service_healthy
     healthcheck:
       disable: true
+    << : *log-config
 
 # raiden-transport containers
   synapse:
@@ -88,29 +113,178 @@ services:
       - ${DATA_DIR:-./data}/well-known:/data_well_known
       - ${DATA_DIR:-./data}/synapse:/data
     environment:
-      - SERVER_NAME
+      - SERVER_NAME=transport.${SERVER_NAME}
       - URL_KNOWN_FEDERATION_SERVERS
+    command: ["/synapse-venv/bin/python", "-m", "synapse.app.homeserver", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/homeserver.yaml"]
     depends_on:
       db:
         condition: service_healthy
+    << : *log-config
     labels:
       - "traefik.enable=true"
-      - "traefik.default.port=8008"
-      - "traefik.default.frontend.rule=Host:${SERVER_NAME}"
-      - "traefik.default.backend.healthcheck.path=/_matrix/client/versions"
-      - "traefik.metrics.port=9101"
-      - "traefik.metrics.frontend.rule=Host:metrics.${SERVER_NAME}"
-      - "traefik.metrics.frontend.whiteList.sourceRange=${CIDR_ALLOW_METRICS}"
-      - "traefik.metrics.frontend.whiteList.useXForwardedFor=false"
+      - "traefik.http.routers.synapse.rule=Host(`transport.${SERVER_NAME}`)"
+      - "traefik.http.routers.synapse.tls=true"
+      - "traefik.http.routers.synapse.tls.certresolver=le"
+      - "traefik.http.routers.synapse.service=synapse"
+      - "traefik.http.services.synapse.loadbalancer.server.port=8008"
+      - "traefik.http.services.synapse.loadbalancer.healthcheck.path=/_matrix/client/versions"
+      - "traefik.http.routers.metrics.rule=Host(`metrics.transport.${SERVER_NAME}`)"
+      - "traefik.http.routers.metrics.tls=true"
+      - "traefik.http.routers.metrics.tls.certresolver=le"
+      - "traefik.http.routers.metrics.middlewares=metrics-access-control@docker"
+      - "traefik.http.routers.metrics.service=metrics"
+      - "traefik.http.services.metrics.loadbalancer.server.port=9101"
+      - "traefik.http.middlewares.metrics-access-control.ipwhitelist.sourcerange=${CIDR_ALLOW_METRICS}"
       - "purge_restart_container=true"
+
+  synchrotron:
+    << : *IMAGE_SYNAPSE_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+      - ${DATA_DIR:-./data}/synapse:/data
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    entrypoint: ["/synapse-venv/bin/python", "-m", "synapse.app.synchrotron", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/synchrotron.yaml"]
+    healthcheck:
+      disable: true
+    scale: ${WORKER_COUNT:-4}
+    <<: *log-config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.synchrotron.rule=Host(`transport.${SERVER_NAME}`) && (PathPrefix(`/_matrix/client/{version:(v2_alpha|r0)}/sync`) || PathPrefix(`/_matrix/client/{version:(api/v1|v2_alpha|r0)}/events`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0)}/initialSync`) && PathPrefix(`/_matrix/client/{version:(api/v1|r0)}/rooms/{room:[^/]+}/initialSync`))"
+      - "traefik.http.routers.synchrotron.tls=true"
+      - "traefik.http.routers.synchrotron.tls.certresolver=le"
+      - "traefik.http.routers.synchrotron.service=synchrotron"
+      - "traefik.http.services.synchrotron.loadbalancer.server.port=8008"
+      - "traefik.http.services.synchrotron.loadbalancer.sticky=true"
+
+  federation_reader:
+    << : *IMAGE_SYNAPSE_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+      - ${DATA_DIR:-./data}/synapse:/data
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    entrypoint: ["/synapse-venv/bin/python", "-m", "synapse.app.federation_reader", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/federation_reader.yaml"]
+    healthcheck:
+      disable: true
+    << : *log-config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.frontend.rule=Host(`transport.${SERVER_NAME}`) && (PathPrefix(`/_matrix/federation/v1/{type:(backfill|event|event_auth|exchange_third_party_invite|get_missing_events|invite|make_join|make_leave|publicRoom|query|query_auth|send|send_join|send_leave|state|state_ids)}`) || PathPrefix(`/_matrix/federation/v2/{type:(invite|send_join|send_leave)}`) || PathPrefix(`/_matrix/key/v2/query`))"
+      - "traefik.http.routers.federation_reader.tls=true"
+      - "traefik.http.routers.federation_reader.tls.certresolver=le"
+      - "traefik.http.routers.federation_reader.service=federation_reader"
+      - "traefik.http.services.federation_reader.loadbalancer.server.port=8008"
+
+  federation_sender:
+    << : *IMAGE_SYNAPSE_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+      - ${DATA_DIR:-./data}/synapse:/data
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    entrypoint: ["/synapse-venv/bin/python", "-m", "synapse.app.federation_sender", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/federation_sender.yaml"]
+    healthcheck:
+      disable: true
+    << : *log-config
+
+  client_reader:
+    << : *IMAGE_SYNAPSE_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+      - ${DATA_DIR:-./data}/synapse:/data
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    entrypoint: ["/synapse-venv/bin/python", "-m", "synapse.app.client_reader", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/client_reader.yaml"]
+    scale: ${WORKER_COUNT:-4}
+    << : *log-config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.frontend.rule=Host(`transport.${SERVER_NAME}`) && (PathPrefix(`/_matrix/client/versions`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/publicRooms`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/rooms/{room:.*}/joined_members`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/rooms/{room:.*}/context/{context:.*}`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/rooms/{room:.*}/members`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/rooms/{room:.*}/state`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/account/3pid`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/keys/query`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/keys/changes`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/voip/turnServer`))"
+      - "traefik.http.routers.client_reader.tls=true"
+      - "traefik.http.routers.client_reader.tls.certresolver=le"
+      - "traefik.http.routers.client_reader.service=client_reader"
+      - "traefik.http.services.client_reader.loadbalancer.server.port=8008"
+      - "traefik.http.services.client_reader.loadbalancer.sticky=true"
+
+  user_dir:
+    << : *IMAGE_SYNAPSE_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+      - ${DATA_DIR:-./data}/synapse:/data
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    entrypoint: ["/synapse-venv/bin/python", "-m", "synapse.app.user_dir", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/user_dir.yaml"]
+    healthcheck:
+      disable: true
+    scale: ${WORKER_COUNT:-4}
+    << : *log-config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.frontend.rule=Host(`transport.${SERVER_NAME}`) && PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/user_directory/search`)"
+      - "traefik.http.routers.user_dir.tls=true"
+      - "traefik.http.routers.user_dir.tls.certresolver=le"
+      - "traefik.http.routers.user_dir.service=user_dir"
+      - "traefik.http.services.user_dir.loadbalancer.server.port=8008"
+      - "traefik.http.services.user_dir.loadbalancer.sticky=true"
+
+  event_creator:
+    << : *IMAGE_SYNAPSE_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+      - ${DATA_DIR:-./data}/synapse:/data
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    entrypoint: ["/synapse-venv/bin/python", "-m", "synapse.app.event_creator", "--config-path", "/config/synapse.yaml", "--config-path", "/config/workers/event_creator.yaml"]
+    healthcheck:
+      disable: true
+    scale: ${WORKER_COUNT:-4}
+    << : *log-config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.frontend.rule=Host(`transport.${SERVER_NAME}`) && (PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/rooms/{room:.*}/send`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/rooms/{room:.*}/{action:(join|invite|leave|ban|unban|kick)}`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/join/`) || PathPrefix(`/_matrix/client/{version:(api/v1|r0|unstable)}/profile/`))"
+      - "traefik.http.routers.event_creator.tls=true"
+      - "traefik.http.routers.event_creator.tls.certresolver=le"
+      - "traefik.http.routers.event_creator.service=event_creator"
+      - "traefik.http.services.event_creator.loadbalancer.server.port=8008"
+      - "traefik.http.services.event_creator.loadbalancer.sticky=true"
+
 
   db:
     << : *IMAGE_DB_VERSION
     restart: always
     volumes:
       - ${DATA_DIR:-./data}/db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: "trust"
     healthcheck:
       test: echo 'select 1' | psql -U postgres > /dev/null || exit 1
+    << : *log-config
 
   # Serves the .well-known/matrix/server file
   well_known_server:
@@ -121,14 +295,39 @@ services:
     depends_on:
       synapse:
         condition: service_healthy
+    << : *log-config
     labels:
       - "traefik.enable=true"
-      - "traefik.frontend.rule=Host:${SERVER_NAME}; PathPrefix: /.well-known/matrix"
+      - "traefik.http.routers.well-known.rule=Host(`transport.${SERVER_NAME}`) && PathPrefix(`/.well-known/matrix`)"
+      - "traefik.http.routers.well-known.entrypoints=websecure"
+      - "traefik.http.routers.well-known.tls=true"
+      - "traefik.http.routers.well-known.tls.certresolver=le"
+
+  room_ensurer:
+    << : *IMAGE_ROOM_ENSURER_VERSION
+    restart: always
+    volumes:
+      - ./config/synapse:/config
+    depends_on:
+      synapse:
+        condition: service_healthy
+    environment:
+      - SERVER_NAME=transport.${SERVER_NAME}
+      - URL_KNOWN_FEDERATION_SERVERS
+    command:
+      - "--own-server"
+      - "transport.${SERVER_NAME}"
+      - "--log-level"
+      - "DEBUG"
+      - "--credentials-file"
+      - "/config/admin_user_cred.json"
+    << : *log-config
+
   purger:
     << : *IMAGE_PURGER_VERSION
     restart: always
     volumes:
-      - ./purge:/app
+      - ./config/synapse:/config
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /app
     depends_on:
@@ -138,15 +337,14 @@ services:
         condition: service_healthy
     environment:
       - PURGE_SLEEP_UNTIL=05:00:00
-      - MATRIX_DOCKER_RESTART_LABEL=purge_restart_container
-      - MATRIX_DB_URI=postgres://postgres@db:5432/synapse
-      - MATRIX_SERVER=http://synapse:8008
-      - SERVER_NAME
-      - MATRIX_ADMIN_PRIVATE_KEY_PASSWORD=
-      - MATRIX_ADMIN_PRIVATE_KEY_GENERATE=1
-      - MATRIX_KEEP_NEWER=15
-      - MATRIX_KEEP_MIN_MSGS=3000
-    command: bash purge.sh
+    command:
+      - "http://synapse:8008"
+      - "--docker-restart-label"
+      - "purge_restart_container"
+      - "--credentials-file"
+      - "/config/admin_user_cred.json"
+    << : *log-config
+
 # common traefik
   traefik:
     << : *IMAGE_TRAEFIK_VERSION
@@ -158,22 +356,22 @@ services:
       - ./config/traefik:/etc/traefik
       - ${DATA_DIR:-./data}/traefik:/data
       - /var/run/docker.sock:/var/run/docker.sock
-    command: --acme.email=${LETSENCRYPT_EMAIL}
-    depends_on:
-      synapse:
-        condition: service_healthy
-      well_known_server:
-        condition: service_healthy
-      pfs:
-        condition: service_started
-      ms:
-        condition: service_healthy
-      msrc:
-        condition: service_started
+    command: --certificatesResolvers.le.acme.email=${LETSENCRYPT_EMAIL}
     healthcheck:
       disable: true
+    << : *log-config
     labels:
       - "traefik.enable=true"
-      - "traefik.port=8080"
-      - "traefik.frontend.rule=Host:proxy.${SERVER_NAME}"
-      - "traefik.frontend.whiteList.sourceRange=${CIDR_ALLOW_PROXY}"
+      - "traefik.http.routers.traefik.rule=Host(`proxy.${SERVER_NAME}`)"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.tls.certresolver=le"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.middlewares=traefik-access-control@docker"
+      - "traefik.http.routers.traefik-metrics.rule=Host(`proxy.${SERVER_NAME}`) && PathPrefix(`/metrics`)"
+      - "traefik.http.routers.traefik-metrics.tls=true"
+      - "traefik.http.routers.traefik-metrics.tls.certresolver=le"
+      - "traefik.http.routers.traefik-metrics.service=prometheus@internal"
+      - "traefik.http.routers.traefik-metrics.entrypoints=websecure"
+      - "traefik.http.routers.traefik-metrics.middlewares=traefik-access-control@docker"
+      - "traefik.http.middlewares.traefik-access-control.ipwhitelist.sourcerange=${CIDR_ALLOW_METRICS}"
